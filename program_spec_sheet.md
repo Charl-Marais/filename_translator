@@ -94,7 +94,6 @@ Module 4: Automatic Orchestrator (`orchestrator.py`)
 
         async def start_auto_loop(self):
             """Continuous loop pulling, dispatching, and reconciling sub-hash states."""
-
     ```
 
 -   The Orchestration Cycle Protocol:
