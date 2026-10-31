@@ -86,21 +86,50 @@ async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStag
 
 def local_detect_language(text: str) -> str:
     """
-    Offline local language detection block.
-    For production: pip install langdetect
+    Predicts language code based on isolated filename strings.
+    Handles short inputs and strips numbering/symbols to protect engine accuracy.
     """
+    # Step 1: Normalise text and strip noise characters (numbers, underscores, common extensions)
+    import re
+    import unicodedata
+    
+    clean_text = text.replace('_', ' ').replace('-', ' ')
+    clean_text = re.sub(r'[0-9]+', '', clean_text)  # Remove numeric groupings
+    clean_text = clean_text.strip()
+    
+    if not clean_text:
+        return "en"  # Default fallback if the file is numeric-only
+        
+    # Step 2: Immediate Script Range Traversal (Flawless for short international text strings)
+    has_japanese = any(
+        0x3040 <= ord(c) <= 0x309F or  # Hiragana
+        0x30A0 <= ord(c) <= 0x30FF or  # Katakana
+        0x4E00 <= ord(c) <= 0x9FFF     # Common Kanji
+        for c in clean_text
+    )
+    if has_japanese:
+        return "ja"
+        
+    has_cyrillic = any(0x0400 <= ord(c) <= 0x04FF for c in clean_text)
+    if has_cyrillic:
+        return "ru"
+
+    # Step 3: Statistical Library Processing (Best for Latin alphabets: English, Spanish, French, etc.)
     try:
-        from langdetect import detect
-        # Strip numbers/symbols to help the accuracy engine
-        clean_text = ''.join(c for c in text if c.isalpha() or c.isspace())
-        if not clean_text.strip():
+        from langdetect import detect, DetectorFactory
+        # Force deterministic outputs so matching results don't fluctuate randomly on restarts
+        DetectorFactory.seed = 0 
+        
+        # Don't throw the library into short text loops if it only has 1 or 2 characters
+        if len(clean_text) < 3:
             return "en"
+            
         return detect(clean_text)
-    except ImportError:
-        # Fallback if library isn't available yet
-        if any(ord(c) > 0x3000 for c in text): # Rough check for CJK characters
-            return "ja"
+        
+    except (ImportError, Exception):
+        # Defend against library missing, or LangDetectException caused by short strings
         return "en"
+
 
 
 async def process_language_detection_batch(
@@ -162,9 +191,10 @@ async def main():
     
     print("\n⚡ Running Pass 1: Instant File System Discovery...")
     raw_stage = await resolve_inputs([path_input], recursive=True)
-    print(f"   [Done] Discovered {len(raw_stage)} files.")
+    total_discovered = len(raw_stage)
+    print(f"   [Done] Discovered {total_discovered} files raw on disk.")
     
-    if not raw_stage:
+    if not total_discovered:
         print("❌ No files found.")
         return
 
@@ -177,6 +207,26 @@ async def main():
         target_lang=target_lang,
         progress_callback=print_progress
     )
+
+    # --- METRIC COMPUTATION ENGINE ---
+    print("\n" + "=" * 60)
+    print("📊 FINAL SCAN SUMMARY REPORT")
+    print("=" * 60)
+    print(f" Total Files Found on Disk : {total_discovered}")
+    print(f" Total Registered in Hash  : {len(registry)}")
+    
+    # Breakdown Action types
+    to_translate = [p for p, data in registry.items() if data['action'] == 'TRANSLATE']
+    excluded = [p for p, data in registry.items() if data['action'] == 'EXCLUDE']
+    
+    print(f"   ├─ Active Translation Needed : {len(to_translate)}")
+    print(f"   └─ Automatically Excluded    : {len(excluded)} (Already matches '{target_lang}')")
+    
+    # Language distribution profiling metrics
+    lang_counts = {}
+    for data in registry.values():
+        lang = data['detected_lang']
+        lang_counts[lang] = lang_counts.get(lang, 0) + 1
     
     print("\n\n📊 REVISED MASTER HASH SAMPLE PROFILE:")
     if registry:
@@ -184,6 +234,20 @@ async def main():
         first_key = keys_list[0]
         # ensure_ascii=False completely eliminates \uXXXX escape garbage in print profiles!
         print(json.dumps(registry[first_key], indent=4, ensure_ascii=False))
+    print("=" * 60)
+
+    # --- JSON EXPORT BLOCK ---
+    output_filename = "master_registry_snapshot.json"
+    print(f"\n💾 Exporting active data schema to file...")
+    try:
+        with open(output_filename, "w", encoding="utf-8") as f:
+            # ensure_ascii=False saves real unicode text strings like Japanese instead of \uXXXX escapes
+            json.dump(registry, f, indent=4, ensure_ascii=False)
+        print(f"   🎉 Success! Created: {output_filename}")
+        print("   This file represents the exact state that the Orchestrator feeds to your workers.")
+    except Exception as e:
+        print(f"   ❌ Export failed: {e}")
+        
     print("=" * 60)
 
 if __name__ == "__main__":
