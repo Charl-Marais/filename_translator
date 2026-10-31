@@ -167,7 +167,8 @@ async def main():
     
     print("\n\n📊 REVISED MASTER HASH SAMPLE PROFILE:")
     if registry:
-        first_key = list(registry.keys())
+        keys_list = list(registry.keys())
+        first_key = keys_list[0]
         # ensure_ascii=False completely eliminates \uXXXX escape garbage in print profiles!
         print(json.dumps(registry[first_key], indent=4, ensure_ascii=False))
     print("=" * 60)
