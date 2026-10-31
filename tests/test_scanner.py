@@ -1,7 +1,7 @@
 # test_scanner.py
 import pytest
 from pathlib import Path
-from scanner import scan_inputs, resolve_inputs
+from lib.scanner import scan_inputs, resolve_inputs
 
 # Mark all tests in this file as async coroutines
 pytestmark = pytest.mark.asyncio
