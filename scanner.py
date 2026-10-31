@@ -1,17 +1,26 @@
 # scanner.py
 import os
+import sys
+import json
+import asyncio
 from pathlib import Path
-from typing import List, Callable, Optional, Dict
-from collections.abc import AsyncGenerator
+from typing import List, Callable, Optional, Dict, TypedDict, Literal
+import unicodedata
 
-# Define types matching system spec
-from typing import TypedDict, Literal
+# Force standard output to support unicode rendering on Windows/Linux environments
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
 
 class FileState(TypedDict):
-    original_filename: str
-    base_name: str
+    # System Keys
+    system_abs_path: str          # For exact OS operations
+    # User legibility keys
+    display_filename: str         # Unicode normalised for UI
+    display_base_name: str
+    display_dir: str
     extension: str
-    current_dir: str
+    
+    # Process Metrics
     detected_lang: str
     target_lang: str
     action: Literal["PENDING", "TRANSLATE", "EXCLUDE", "RENAME", "COMPLETED"]
@@ -23,28 +32,17 @@ class FileState(TypedDict):
     retry_count: int
 
 MasterRegistry = Dict[str, FileState]
+RawDiscoveryStage = List[Path]
 
 
-def mock_detect_language(text: str) -> str:
+async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStage:
     """
-    Placeholder language detector.
-    In production, replace this with a fast wrapper like langdetect or fasttext.
-    For demonstration/testing, it returns 'es' if name contains '_es', else 'en'.
+    Pass 1: Instant Discovery.
+    Safely captures files with spaces and international text characters.
     """
-    if "_es" in text.lower():
-        return "es"
-    return "en"
-
-
-async def resolve_inputs(inputs: List[str], recursive: bool) -> List[Path]:
-    """
-    Iterates through input directives, sanitises them, expands folders 
-    (recursively if flagged), and extracts concrete file targets.
-    """
-    valid_paths: List[Path] = []
-    
-    # Pre-process inputs in case comma-separated values are combined inside a string
+    discovered_files: List[Path] = []
     processed_inputs = []
+    
     for item in inputs:
         if "," in item:
             processed_inputs.extend([i.strip() for i in item.split(",") if i.strip()])
@@ -52,63 +50,75 @@ async def resolve_inputs(inputs: List[str], recursive: bool) -> List[Path]:
             processed_inputs.append(item.strip())
 
     for input_str in processed_inputs:
-        path_obj = Path(input_str).resolve()
+        # Normalise unicode string inputs to handle specific filesystem variations
+        safe_str = unicodedata.normalize('NFC', input_str)
+        path_obj = Path(safe_str).resolve()
         
         if not path_obj.exists():
             continue
             
         if path_obj.is_file():
-            valid_paths.append(path_obj)
-            
+            discovered_files.append(path_obj)
         elif path_obj.is_dir():
-            # Choose scanning depth based on recursion constraint
-            pattern = "**/*" if recursive else "*"
-            for sub_path in path_obj.glob(pattern):
-                if sub_path.is_file():
-                    valid_paths.append(sub_path)
+            # os.walk is historically more robust for messy spaces and raw bytes than globbing
+            for root, _, files in os.walk(str(path_obj)):
+                for file in files:
+                    file_path = Path(root) / file
+                    discovered_files.append(file_path)
+                if not recursive:
+                    break  # Stop immediately if recursion is disabled
                     
-    return list(set(valid_paths))  # De-duplicate paths
+    return list(set(discovered_files))
 
 
-async def scan_inputs(
-    inputs: List[str], 
-    recursive: bool, 
+def local_detect_language(text: str) -> str:
+    """
+    Offline local language detection block.
+    For production: pip install langdetect
+    """
+    try:
+        from langdetect import detect
+        # Strip numbers/symbols to help the accuracy engine
+        clean_text = ''.join(c for c in text if c.isalpha() or c.isspace())
+        if not clean_text.strip():
+            return "en"
+        return detect(clean_text)
+    except ImportError:
+        # Fallback if library isn't available yet
+        if any(ord(c) > 0x3000 for c in text): # Rough check for CJK characters
+            return "ja"
+        return "en"
+
+
+async def process_language_detection_batch(
+    raw_stage: RawDiscoveryStage,
     target_lang: str,
     progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> MasterRegistry:
     """
-    Sanitises raw inputs, calculates files, runs percentage updates, 
-    evaluates target languages, and yields an actionable MasterRegistry.
+    Pass 2: Asynchronous Detection Processor.
+    Processes discovered items, normalises text paths, and generates master hash.
     """
     registry: MasterRegistry = {}
+    total = len(raw_stage)
     
-    # 1. Resolve inputs into unique file paths
-    target_files = await resolve_inputs(inputs, recursive)
-    total_files = len(target_files)
-    
-    if total_files == 0:
-        return registry
-
-    # 2. Process and construct metadata definitions
-    for idx, file_path in enumerate(target_files, start=1):
-        original_name = file_path.name
-        base_name = file_path.stem
-        extension = file_path.suffix
-        current_dir = str(file_path.parent)
-        abs_path = str(file_path)
+    for idx, path in enumerate(raw_stage, start=1):
+        # Normalise string outputs to look natural to users (Fixes bug 2)
+        system_path = str(path)
+        display_name = unicodedata.normalize('NFC', path.name)
+        display_base = unicodedata.normalize('NFC', path.stem)
+        display_dir = unicodedata.normalize('NFC', str(path.parent))
         
-        # Determine language context
-        detected_lang = mock_detect_language(base_name)
+        # Run local offline language detection
+        detected_lang = local_detect_language(display_base)
+        action_state = "EXCLUDE" if detected_lang == target_lang else "TRANSLATE"
         
-        # Match exclusion rules logic
-        is_already_target = (detected_lang == target_lang)
-        action_state = "EXCLUDE" if is_already_target else "TRANSLATE"
-        
-        registry[abs_path] = {
-            "original_filename": original_name,
-            "base_name": base_name,
-            "extension": extension,
-            "current_dir": current_dir,
+        registry[system_path] = {
+            "system_abs_path": system_path,
+            "display_filename": display_name,
+            "display_base_name": display_base,
+            "display_dir": display_dir,
+            "extension": path.suffix,
             "detected_lang": detected_lang,
             "target_lang": target_lang,
             "action": action_state,
@@ -120,57 +130,47 @@ async def scan_inputs(
             "retry_count": 0
         }
         
-        # 3. Fire UI tick if hook exists
+        # Small sleep interval so heavy detection loops don't lock the UI execution stream
+        if idx % 50 == 0:
+            await asyncio.sleep(0.01)
+            
         if progress_callback:
-            progress_callback(idx, total_files)
+            progress_callback(idx, total)
             
     return registry
 
-import json
-
 async def main():
     print("=" * 60)
-    print("📂 ASYNC DIRECTORY SCANNER - MANUAL TEST RUN")
+    print("📂 TWO-PASS ASYNC DIRECTORY SCANNER")
     print("=" * 60)
     
-    # Prompt the user for real test inputs
-    path_input = input("Enter a directory path, single file, or comma-separated list: ").strip()
-    recursive_input = input("Scan recursively? (y/n): ").strip().lower() == 'y'
-    target_lang = input("Enter target language code (e.g., es, fr): ").strip().lower()
+    path_input = input("Enter directory or file path: ").strip()
+    target_lang = input("Enter target language code (e.g., es, ja, en): ").strip().lower()
     
-    print("\n🔎 Initialising Scan...")
+    print("\n⚡ Running Pass 1: Instant File System Discovery...")
+    raw_stage = await resolve_inputs([path_input], recursive=True)
+    print(f"   [Done] Discovered {len(raw_stage)} files.")
     
-    # Simple inline progress bar callback
-    def print_progress(current, total):
-        percentage = (current / total) * 100
-        print(f"   [Progress] {current}/{total} files analyzed ({percentage:.1f}%)", end="\r")
+    if not raw_stage:
+        print("❌ No files found.")
+        return
 
-    # Execute the scanner module
-    registry = await scan_inputs(
-        inputs=[path_input], 
-        recursive=recursive_input, 
+    print("\n⚡ Running Pass 2: Asynchronous Batch Language Detection...")
+    def print_progress(current, total):
+        print(f"   [Processing] {current}/{total} evaluated...", end="\r")
+
+    registry = await process_language_detection_batch(
+        raw_stage=raw_stage,
         target_lang=target_lang,
         progress_callback=print_progress
     )
     
-    print("\n\n📊 SCAN RESULTS PROFILE:")
-    print(f"Total Unique Files Registered: {len(registry)}")
-    
-    # Separate actionable items for a clean readout
-    to_translate = [path for path, data in registry.items() if data['action'] == 'TRANSLATE']
-    excluded = [path for path, data in registry.items() if data['action'] == 'EXCLUDE']
-    
-    print(f"   └─ Keyed for Translation : {len(to_translate)}")
-    print(f"   └─ Automatically Excluded: {len(excluded)}")
-    
+    print("\n\n📊 REVISED MASTER HASH SAMPLE PROFILE:")
     if registry:
-        print("\n🔍 Sample Structure of First Registered File:")
-        first_key = list(registry.keys())[0]
-        # Pretty print the dictionary payload
-        print(json.dumps(registry[first_key], indent=4))
-        
+        first_key = list(registry.keys())
+        # ensure_ascii=False completely eliminates \uXXXX escape garbage in print profiles!
+        print(json.dumps(registry[first_key], indent=4, ensure_ascii=False))
     print("=" * 60)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
