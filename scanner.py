@@ -37,12 +37,13 @@ RawDiscoveryStage = List[Path]
 
 async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStage:
     """
-    Pass 1: Instant Discovery.
-    Safely captures files with spaces and international text characters.
+    Pass 1: Instant Discovery (Upgraded for spaces and international strings).
+    Ensures safe navigation across file trees containing spaces, brackets, or emojis.
     """
     discovered_files: List[Path] = []
     processed_inputs = []
     
+    # 1. Parse and un-escape comma-separated or raw string lines
     for item in inputs:
         if "," in item:
             processed_inputs.extend([i.strip() for i in item.split(",") if i.strip()])
@@ -50,23 +51,35 @@ async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStag
             processed_inputs.append(item.strip())
 
     for input_str in processed_inputs:
-        # Normalise unicode string inputs to handle specific filesystem variations
-        safe_str = unicodedata.normalize('NFC', input_str)
-        path_obj = Path(safe_str).resolve()
+        # Step A: Clean terminal quotes if a user dragged-and-dropped a folder into the terminal
+        clean_str = input_str.strip("'\"")
         
-        if not path_obj.exists():
-            continue
+        # Step B: Standardise OS filesystem text bytes back into unified NFC Unicode paths
+        safe_str = unicodedata.normalize('NFC', os.fsdecode(clean_str))
+        
+        # Step C: Use absolute path construction to bypass structural glob failures
+        base_path = Path(safe_str).absolute()
+        
+        if not base_path.exists():
+            # Fallback check for relative workspace directory matching
+            base_path = Path(os.getcwd()).absolute() / safe_str
+            if not base_path.exists():
+                continue
             
-        if path_obj.is_file():
-            discovered_files.append(path_obj)
-        elif path_obj.is_dir():
-            # os.walk is historically more robust for messy spaces and raw bytes than globbing
-            for root, _, files in os.walk(str(path_obj)):
+        if base_path.is_file():
+            discovered_files.append(base_path)
+            
+        elif base_path.is_dir():
+            # Directly use os.walk across safe bytes-decoded path strings 
+            # to guarantee compatibility with spaces or leading symbols
+            for root, _, files in os.walk(str(base_path)):
                 for file in files:
+                    # Explicitly join using pathlib to keep tracking formats uniform
                     file_path = Path(root) / file
                     discovered_files.append(file_path)
+                    
                 if not recursive:
-                    break  # Stop immediately if recursion is disabled
+                    break  # Drop execution out of nested children loops
                     
     return list(set(discovered_files))
 
