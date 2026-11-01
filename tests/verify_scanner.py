@@ -1,21 +1,12 @@
-# test_scanner.py
+# Inside tests/verify_scanner.py
 import pytest
 import os
 import json
 import unicodedata
 from pathlib import Path
-import importlib.util
 
-# Get path to the file
-scanner__filepath = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'lib', 'scanner.py'))
-
-# Load the module dynamically
-scanner_spec = importlib.util.spec_from_file_location("dynamic_file", scanner__filepath)
-scanner_module = importlib.util.module_from_spec(scanner_spec)
-scanner_spec.loader.exec_module(scanner_module)
-
-# Pull the contents directly into your current global namespace
-globals().update(vars(scanner_module))
+# Explicitly pull from your lib structure
+from lib.scanner import resolve_inputs, process_language_detection_batch
 
 # Mark all test coroutines as asynchronous
 pytestmark = pytest.mark.asyncio
