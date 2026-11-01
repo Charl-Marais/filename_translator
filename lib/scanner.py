@@ -35,7 +35,7 @@ MasterRegistry = Dict[str, FileState]
 RawDiscoveryStage = List[Path]
 
 
-async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStage:
+async def resolve_inputs(inputs: List[str], recursive: bool, max_depth: Optional[int] = None) -> RawDiscoveryStage:
     """
     Pass 1: Instant Discovery (Upgraded for spaces and international strings).
     Ensures safe navigation across file trees containing spaces, brackets, or emojis.
@@ -70,16 +70,23 @@ async def resolve_inputs(inputs: List[str], recursive: bool) -> RawDiscoveryStag
             discovered_files.append(base_path)
             
         elif base_path.is_dir():
-            # Directly use os.walk across safe bytes-decoded path strings 
-            # to guarantee compatibility with spaces or leading symbols
+            base_depth = len(base_path.parts)
+            
             for root, _, files in os.walk(str(base_path)):
-                for file in files:
-                    # Explicitly join using pathlib to keep tracking formats uniform
-                    file_path = Path(root) / file
-                    discovered_files.append(file_path)
+                current_path = Path(root)
+                current_depth = len(current_path.parts)
+                depth_delta = current_depth - base_depth
+
+                # Enforce recursion layout rules
+                if not recursive and depth_delta > 0:
+                    continue  # Skip processing subdirectories entirely if recursion is off
+                
+                if max_depth is not None and max_depth != 0 and depth_delta > max_depth:
+                    continue  # Skip directories that exceed our maximum configured depth tier
                     
-                if not recursive:
-                    break  # Drop execution out of nested children loops
+                for file in files:
+                    file_path = current_path / file
+                    discovered_files.append(file_path)
                     
     return list(set(discovered_files))
 
@@ -188,9 +195,11 @@ async def main():
     
     path_input = input("Enter directory or file path: ").strip()
     target_lang = input("Enter target language code (e.g., es, ja, en): ").strip().lower()
-    
+    recursive = input("Scan recursively? (y/n): ").strip().lower() == 'y'
+    max_depth = int(input("Enter max depth (0 for no limit): ")) if recursive else None
+
     print("\n⚡ Running Pass 1: Instant File System Discovery...")
-    raw_stage = await resolve_inputs([path_input], recursive=True)
+    raw_stage = await resolve_inputs([path_input], recursive=recursive, max_depth=max_depth)
     total_discovered = len(raw_stage)
     print(f"   [Done] Discovered {total_discovered} files raw on disk.")
     
